@@ -13,7 +13,7 @@ def run_athena_to_bq(query, database, s3_output, bq_table):
     s3 = boto3.client("s3")
     bq_client = bigquery.Client(project=os.getenv("GCP_PROJECT", "asksuite-salesops"))
 
-    print(f"executando query para {bq_table}...")
+    print(f"→ executando query para {bq_table}...")
     execution = athena.start_query_execution(
         QueryString=query,
         QueryExecutionContext={"Database": database},
@@ -45,51 +45,69 @@ def run_athena_to_bq(query, database, s3_output, bq_table):
         job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
     )
     job.result()
-    print(f"tabela {bq_table} atualizada com sucesso.\n")
+    print(f" tabela {bq_table} atualizada com sucesso.\n")
 
 
 @app.route("/", methods=["GET"])
 def main():
-    query1 = """
-    WITH w_askflow AS (
-        SELECT company_id, COALESCE(
-            json_extract_scalar(name_i18n, '$["pt-br"]'),
-            json_extract_scalar(name_i18n, '$["en-us"]'),
-            json_extract_scalar(name_i18n, '$["es-es"]'),
-            json_extract_scalar(name_i18n, '$["text"]')
-        ) AS name
-        FROM flow_daily.public_en_organization
-        CROSS JOIN UNNEST(cast(json_parse(ids_external_partner) AS array<varchar>)) AS t(company_id)
-        WHERE status = 'active'
-    )
-    SELECT
-        public_companies.company_id,
-        json_extract_scalar(json, '$.whatsAppNumberGupshup') AS whatsappNumber,
-        json_extract_scalar(json, '$.code7PhoneNumber') AS voipNumber,
-        w_askflow.name AS askFlowName
-    FROM asksuite_control.public_companies
-    LEFT JOIN w_askflow ON w_askflow.company_id = public_companies.company_id
-    WHERE COALESCE(json_extract_scalar(json, '$.disabled'), 'false') = 'false'
-    ORDER BY public_companies.company_id
-    """
+    print("Iniciando execução do pipeline Athena → BigQuery")
 
-    query2 = """
-    SELECT
-    company_id,
-    count(*) AS count_reservations,
-    sum(cast(total_price_brl AS double)) FILTER (WHERE user_id IS NOT NULL) AS total_human_brl_90_days,
-    sum(cast(total_price_brl AS double)) FILTER (WHERE user_id IS NULL) AS total_bot_brl_90_days,
-    sum(cast(total_price_brl AS double)) AS total_brl_90_days
-    FROM asksuite_control.public_reservations
-    WHERE try(date_parse(reservation_date, '%Y-%m-%d %H:%i:%s.%f')) >= date_add('month', -3, current_date)
-    GROUP BY company_id
-    ORDER BY total_brl_90_days DESC
-    """
+    try:
+        query1 = """
+        WITH w_askflow AS (
+            SELECT company_id, COALESCE(
+                json_extract_scalar(name_i18n, '$["pt-br"]'),
+                json_extract_scalar(name_i18n, '$["en-us"]'),
+                json_extract_scalar(name_i18n, '$["es-es"]'),
+                json_extract_scalar(name_i18n, '$["text"]')
+            ) AS name
+            FROM flow_daily.public_en_organization
+            CROSS JOIN UNNEST(cast(json_parse(ids_external_partner) AS array<varchar>)) AS t(company_id)
+            WHERE status = 'active'
+        )
+        SELECT
+            public_companies.company_id,
+            json_extract_scalar(json, '$.whatsAppNumberGupshup') AS whatsappNumber,
+            json_extract_scalar(json, '$.code7PhoneNumber') AS voipNumber,
+            w_askflow.name AS askFlowName
+        FROM asksuite_control.public_companies
+        LEFT JOIN w_askflow ON w_askflow.company_id = public_companies.company_id
+        WHERE COALESCE(json_extract_scalar(json, '$.disabled'), 'false') = 'false'
+        ORDER BY public_companies.company_id
+        """
 
-    run_athena_to_bq(query1, "datalake", "s3://asksuite-athena-results/athena-temp/", "asksuite-salesops.Silver.company_id_by_products")
-    run_athena_to_bq(query2, "datalake", "s3://asksuite-athena-results/athena-temp/", "asksuite-salesops.Silver.Reservations_90d_by_Company")
+        query2 = """
+        SELECT
+        company_id,
+        count(*) AS count_reservations,
+        sum(cast(total_price_brl AS double)) FILTER (WHERE user_id IS NOT NULL) AS total_human_brl_90_days,
+        sum(cast(total_price_brl AS double)) FILTER (WHERE user_id IS NULL) AS total_bot_brl_90_days,
+        sum(cast(total_price_brl AS double)) AS total_brl_90_days
+        FROM asksuite_control.public_reservations
+        WHERE try(date_parse(reservation_date, '%Y-%m-%d %H:%i:%s.%f')) >= date_add('month', -3, current_date)
+        GROUP BY company_id
+        ORDER BY total_brl_90_days DESC
+        """
 
-    return "Pipeline executado com sucesso!"
+        run_athena_to_bq(
+            query1, "datalake",
+            "s3://asksuite-athena-results/athena-temp/",
+            "asksuite-salesops.Silver.company_id_by_products"
+        )
+        run_athena_to_bq(
+            query2, "datalake",
+            "s3://asksuite-athena-results/athena-temp/",
+            "asksuite-salesops.Silver.Reservations_90d_by_Company"
+        )
+
+        print("Execução concluída com sucesso")
+        return "Pipeline executado com sucesso!", 200
+
+    except Exception as e:
+        print("Erro durante execução:", str(e))
+        import traceback
+        traceback.print_exc()
+        return f"Erro durante execução: {str(e)}", 500
 
 
 if __name__ == "__main__":
