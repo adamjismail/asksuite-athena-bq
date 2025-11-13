@@ -89,6 +89,46 @@ def main():
         ORDER BY total_brl_90_days DESC
         """
 
+        query3 = """
+        WITH w_reservations AS (
+    SELECT
+        r.booking_engine,
+        MIN(r.created_at) AS primeira_reserva,
+        MAX(r.created_at) AS ultima_reserva,
+        COUNT(*) AS count_reservas,
+        COUNT(DISTINCT r.company_id) AS count_empresas,
+        array_agg(DISTINCT r.company_id) AS array_empresas,
+
+        COUNT(DISTINCT CASE 
+            WHEN COALESCE(json_extract_scalar(c.json, '$.disabled'), 'false') = 'false'
+            THEN r.company_id
+        END) AS count_empresas_ativas,
+
+        SUM(CAST(r.total_price AS DOUBLE)) AS total_vendido
+
+    FROM asksuite_control.public_reservations r
+    JOIN asksuite_control.public_companies c
+        ON r.company_id = c.company_id
+
+    WHERE r.company_id NOT LIKE '%.%'
+      AND r.id_pixel_event IS NOT NULL
+
+    GROUP BY r.booking_engine
+)
+
+SELECT
+    COALESCE(w.booking_engine, 'Não identificado') AS motor_de_reservas,
+    w.primeira_reserva,
+    w.ultima_reserva,
+    COALESCE(w.count_reservas, 0) AS count_reservas,
+    COALESCE(w.count_empresas, 0) AS count_empresas,
+    w.array_empresas,
+    COALESCE(w.count_empresas_ativas, 0) AS count_empresas_ativas,
+    COALESCE(w.total_vendido, 0) AS total_vendido
+FROM w_reservations w
+ORDER BY 1;
+        """
+
         run_athena_to_bq(
             query1, "datalake",
             "s3://asksuite-athena-results/athena-temp/",
@@ -98,6 +138,11 @@ def main():
             query2, "datalake",
             "s3://asksuite-athena-results/athena-temp/",
             "asksuite-salesops.Silver.Reservations_90d_by_Company"
+        )
+        run_athena_to_bq(
+            query3, "asksuite_control",
+            "s3://asksuite-athena-results/athena-temp/",
+            "asksuite-salesops.Silver.motores_de_reserva_com_pixel_homologado"
         )
 
         print("Execução concluída com sucesso")
